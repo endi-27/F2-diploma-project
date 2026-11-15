@@ -27,12 +27,14 @@ flowchart TB
     LexSys["Lexical Extraction & WSD System<br/>[Software System]<br/>Modular Monolith: вилучення, i+1,<br/>двоконтурний WSD та експорт"]:::system
 
     MediaExt["Media & Web Providers<br/>[System_Ext]<br/>YouTube, подкасти, вебстатті"]:::ext
+    JevExt["System-1 Decision API (Jev)<br/>[System_Ext]<br/>TypeSafe AI: Noul, Choice, Score"]:::ext
     LLMExt["System-2 Cloud LLM API<br/>[System_Ext]<br/>Structured Outputs, Zero Retention"]:::ext
     AnkiExt["Anki / SRS Platforms<br/>[System_Ext]<br/>Клієнти інтервального повторення"]:::ext
 
     User -->|"Джерела, тріаж, експорт<br/>HTTPS / TLS 1.3 (JWT)"| LexSys
     SRE -->|"Аудит стану й черг<br/>HTTPS / Prometheus"| LexSys
     LexSys -->|"Субтитри й аудіо (SSRF)<br/>HTTPS / TLS 1.3"| MediaExt
+    LexSys -->|"Тріаж шуму, вибір сенсу (CB)<br/>HTTPS / POST /v1/systemone"| JevExt
     LexSys -->|"Пакетний WSD (CB)<br/>HTTPS / JSON Schema"| LLMExt
     User -.->|"Імпорт карток<br/>.apkg, .tsv, .csv, .md"| AnkiExt
 ```
@@ -41,7 +43,8 @@ flowchart TB
 - **Кінцевий користувач:** взаємодіє із системою за протоколом `HTTPS / TLS 1.3` (`JWT Bearer`), реалізуючи сценарії інгестії ([`SRS-FUN-01`](./srs.md#srs-fun-01), [`SRS-FUN-02`](./srs.md#srs-fun-02)), тріажу та експорту колод ([`SRS-FUN-14`](./srs.md#srs-fun-14)).
 - **Оператор моніторингу (`SRE`):** отримує доступ до зібраних метрик і структурованих журналів (`X-Correlation-ID`), реалізуючи вимоги спостережуваності [`SRS-NFR-OBS-01`](./srs.md#srs-nfr-obs-01) та контролю збоїв [`SRS-FUN-13`](./srs.md#srs-fun-13).
 - **`Media & Web Providers`:** зовнішні веб- і медіаджерела, звернення до яких виконується через `HTTPS / TLS 1.3` із перевіркою IP-діапазонів (`SSRF Guard`, [`SRS-FUN-01`](./srs.md#srs-fun-01), [`SRS-NFR-SEC-02`](./srs.md#srs-nfr-sec-02)).
-- **`System-2 Cloud LLM API`:** зовнішній провайдер дезамбігуації, взаємодія з яким відбувається через `HTTPS / JSON Schema` із маскуванням `PII` ([`SRS-FUN-11`](./srs.md#srs-fun-11)) і захистом `Circuit Breaker` ([`SRS-NFR-REL-01`](./srs.md#srs-nfr-rel-01)).
+- **`System-1 Decision API (Jev)`:** зовнішня хмарна модель прийняття рішень (`TypeSafe AI`, `POST /v1/systemone`, клієнт `typesafe-sdk`), яка без генерації тексту оцінює стан через типізовані примітиви `Noul` (фільтрація артефактів субтитрів), `Choice` (вибір семантичного сенсу й найкращого речення) та `Score` за `70–500 мс` із маскуванням `PII` і захистом `Circuit Breaker` ([`SRS-FUN-10`](./srs.md#srs-fun-10), [`SRS-NFR-REL-01`](./srs.md#srs-nfr-rel-01)).
+- **`System-2 Cloud LLM API`:** зовнішній генеративний провайдер пакетної дезамбігуації та перекладу нових термінів через `HTTPS / JSON Schema` із маскуванням `PII` ([`SRS-FUN-11`](./srs.md#srs-fun-11)) і захистом `Circuit Breaker` ([`SRS-NFR-REL-01`](./srs.md#srs-nfr-rel-01)).
 - **`Anki / SRS Platforms`:** зовнішні автономні клієнти, у які користувач імпортує сформовані пакети `.apkg`, `.tsv`, `.csv` та `.md` ([`SRS-FUN-14`](./srs.md#srs-fun-14)).
 
 ---
@@ -65,13 +68,14 @@ flowchart TB
         Prom["Prometheus<br/>[Container: TSDB]<br/>Метрики кожні 15 с"]:::container
         API["FastAPI Backend API<br/>[Python 3.12, FastAPI, Pydantic v2]<br/>JWT, MIME, SSRF, експорт"]:::container
         Redis(["Redis 7 Broker & Cache<br/>[ContainerQueue]<br/>Черги ARQ, DLQ, Token Bucket"]):::db
-        NLP["NLP Background Worker<br/>[ARQ, spaCy, Jev, HTTPX]<br/>default_queue, <= 512 MiB"]:::container
+        NLP["NLP Background Worker<br/>[ARQ, spaCy, typesafe-sdk, HTTPX]<br/>default_queue, <= 512 MiB"]:::container
         ASR["ASR Background Worker<br/>[ARQ, faster-whisper INT8]<br/>heavy_queue, <= 2.0 GiB"]:::container
         PG[("PostgreSQL 16<br/>[ContainerDb]<br/>Лексика, сесії, користувачі")]:::db
         MinIO[("MinIO S3 Storage<br/>[ContainerDb]<br/>Транзитні медіа <= 24 год")]:::db
     end
 
     MediaExt["Media & Web Providers<br/>[System_Ext]"]:::ext
+    JevExt["System-1 Jev API<br/>[TypeSafe AI / System_Ext]"]:::ext
     LLMExt["System-2 Cloud LLM API<br/>[System_Ext]"]:::ext
 
     User -->|"Запити й файли <= 500 MB<br/>HTTPS / TLS 1.3"| Proxy
@@ -94,6 +98,7 @@ flowchart TB
 
     NLP -->|"Вебстатті (SSRF)<br/>HTTPS / TLS 1.3"| MediaExt
     ASR -->|"Медіа й субтитри<br/>HTTPS / TLS 1.3"| MediaExt
+    NLP -->|"Noul / Choice / Score<br/>HTTPS / POST /v1/systemone"| JevExt
     NLP -->|"Пакетний WSD<br/>HTTPS / JSON Schema"| LLMExt
 
     style Boundary fill:transparent,stroke:#64748B,stroke-dasharray: 5 5
@@ -102,7 +107,7 @@ flowchart TB
 ##### Технічний опис контейнерів та наскрізне трасування до вимог SRS і ADR
 1. **`Reverse Proxy` (`Nginx 1.25`):** забезпечує термінацію `HTTPS / TLS 1.3`, обмеження максимального розміру тіла запиту `500 MB`, захист від повільних клієнтів і генерацію наскрізного ідентифікатора `X-Correlation-ID` ([`SRS-NFR-SEC-02`](./srs.md#srs-nfr-sec-02), [`SRS-NFR-OBS-01`](./srs.md#srs-nfr-obs-01)).
 2. **`FastAPI Backend API`:** реалізує автентифікацію `JWT Bearer / Argon2id` ([`SRS-NFR-SEC-01`](./srs.md#srs-nfr-sec-01)), прийом `URL` і файлів з перевіркою *magic bytes* та `SSRF` ([`SRS-FUN-01`](./srs.md#srs-fun-01), [`SRS-FUN-02`](./srs.md#srs-fun-02)), ідемпотентну постановку задач ([`SRS-FUN-03`](./srs.md#srs-fun-03), [`SRS-NFR-PERF-02`](./srs.md#srs-nfr-perf-02)) та генерацію файлів експорту ([`SRS-FUN-14`](./srs.md#srs-fun-14)).
-3. **`NLP Background Worker` (`nlp_worker`, ліміт `<= 512 MiB`):** фізично відокремлений процес для обслуговування `default_queue`, що реалізує розбір тексту `spaCy` (`LRU`-кеш на `1` модель), оцінку `i+1 / CEFR`, локальну фільтрацію `System-1 Jev`, пакетні звернення до `System-2 LLM` ([`SRS-FUN-06`](./srs.md#srs-fun-06)–[`SRS-FUN-12`](./srs.md#srs-fun-12)) та асинхронне очищення профілів за `GDPR` ([`SRS-NFR-COMP-01`](./srs.md#srs-nfr-comp-01)). Вибір ізоляції обґрунтовано в [`ADR-001`](./adr/0001-choice-of-technology.md).
+3. **`NLP Background Worker` (`nlp_worker`, ліміт `<= 512 MiB`):** фізично відокремлений процес для обслуговування `default_queue`, що виконує локальний розбір `spaCy` (`LRU`-кеш на `1` модель), оцінку `i+1 / CEFR`, відсікання відомих лем у БД, клієнтську інтеграцію зі зовнішніми сервісами `System-1 Jev API` (`typesafe-sdk` / `HTTPX`) і пакетним `System-2 LLM API` ([`SRS-FUN-06`](./srs.md#srs-fun-06)–[`SRS-FUN-12`](./srs.md#srs-fun-12)) та асинхронне очищення профілів за `GDPR` ([`SRS-NFR-COMP-01`](./srs.md#srs-nfr-comp-01)). Вибір ізоляції обґрунтовано в [`ADR-001`](./adr/0001-choice-of-technology.md).
 4. **`ASR Background Worker` (`transcribe_worker`, ліміт `<= 2.0 GiB`):** ізольований контейнер для `heavy_transcribe_queue`, що завантажує субтитри/аудіо й виконує локальну транскрибацію через `faster-whisper-small (INT8)` до `120 хв` без фрагментації `25 MB` ([`SRS-FUN-04`](./srs.md#srs-fun-04), [`SRS-FUN-05`](./srs.md#srs-fun-05), [`SRS-NFR-PERF-04`](./srs.md#srs-nfr-perf-04), [`SRS-NFR-INFRA-01`](./srs.md#srs-nfr-infra-01)).
 5. **`Redis 7 Broker & Cache`:** виконує роль брокера черг (`default_queue`, `heavy_transcribe_queue`, `default_dlq`, `transcribe_dlq`) за протоколом `RESP3 / TCP (6379)`, кешу ідемпотентності `X-Idempotency-Key`, лічильників `Token Bucket` та чорного списку `JTI` ([`SRS-FUN-03`](./srs.md#srs-fun-03), [`SRS-FUN-13`](./srs.md#srs-fun-13), [`ADR-001`](./adr/0001-choice-of-technology.md)).
 6. **`PostgreSQL 16 Database`:** центральне реляційне сховище (`PostgreSQL Wire / AsyncPG`, порт `5432`), що підтримує індексний пошук дублікатів за `SHA-256` ([`SRS-NFR-PERF-03`](./srs.md#srs-nfr-perf-03)) та атомарне збереження `global_lemmas` і `lexical_senses` ([`SRS-FUN-12`](./srs.md#srs-fun-12), [`ADR-001`](./adr/0001-choice-of-technology.md)).
@@ -113,7 +118,7 @@ flowchart TB
 
 ### 2.1.2. Компонентне моделювання критичного сервісу (C4 Level 3 — Component Diagram)
 
-Для поглибленого проєктування обрано найскладніший серверний контейнер — **`NLP & Semantic Disambiguation Worker (nlp_worker)`**, який поєднує `CPU`-лінгвістику, керування пам'яттю, захист персональних даних і відмовостійку взаємодію із зовнішнім `LLM API`. Внутрішню структуру побудовано за принципами **Clean Architecture** та **Dependency Inversion (DIP)** через контракти `typing.Protocol`.
+Для поглибленого проєктування обрано найскладніший серверний контейнер — **`NLP & Semantic Disambiguation Worker (nlp_worker)`**, який поєднує `CPU`-лінгвістику, керування пам'яттю, санітизацію персональних даних і відмовостійку взаємодію з двома зовнішніми хмарними ШІ-сервісами (`System-1 TypeSafe AI / Jev` та `System-2 Cloud LLM API`). Внутрішню структуру побудовано за принципами **Clean Architecture** та **Dependency Inversion (DIP)** через контракти `typing.Protocol`.
 
 <a id="diagram-level3"></a>
 #### Діаграма C4 Level 3 — Component Diagram (`NLP & Semantic Disambiguation Worker`)
@@ -140,27 +145,29 @@ flowchart TB
         subgraph AppCore["2. Координація та порти (Application & DIP)"]
             direction LR
             UseCase["ProcessAnalysisPipelineUseCase<br/>[Оркестратор пайплайна]"]:::comp
-            Ports["Application Ports<br/>[typing.Protocol]<br/>WebScraper / VocabRepo /<br/>SenseRepo / LLMProvider"]:::port
+            Ports["Application Ports<br/>[typing.Protocol]<br/>WebScraper / VocabRepo / SenseRepo /<br/>System1GatePort / LLMProviderPort"]:::port
         end
 
         subgraph Domain["3. Доменний шар (Domain Core)"]
             direction LR
             LingSvc["Linguistic Analysis<br/>[spaCy LRU <= 1, MWE]"]:::comp
             Profiler["Complexity Profiler<br/>[i+1 / CEFR]"]:::comp
-            PIIGuard["PII Sanitizer<br/>[Zero Retention]"]:::comp
-            WSDEngine["WSD Strategy Engine<br/>[Патерн Strategy]"]:::comp
-            Jev["System-1 Jev<br/>[Локальний WSD]"]:::comp
+            PIIGuard["PII Sanitizer<br/>[Перед зовнішніми AI API]"]:::comp
+            WSDEngine["WSD Strategy Engine<br/>[Каскад S1 -> S2 -> Fallback]"]:::comp
+            Heuristic["Local Heuristic Fallback<br/>[Правила речень + WordNet]"]:::comp
         end
 
         subgraph Outbound["4. Вихідні адаптери (Outbound Adapters)"]
             direction LR
             WebAdapter["Safe Web Scraper<br/>[trafilatura + SSRF Guard]"]:::comp
+            JevAdapter["Resilient Jev Adapter<br/>[typesafe-sdk + CB]"]:::comp
             LLMAdapter["Resilient LLM Adapter<br/>[Tenacity + Circuit Breaker]"]:::comp
             PGRepo["PostgreSQL Adapter<br/>[AsyncPG + ON CONFLICT]"]:::comp
         end
     end
 
     WebExt["External Web Sites<br/>[System_Ext]"]:::ext
+    JevExt["System-1 Jev API<br/>[TypeSafe AI / v1/systemone]"]:::ext
     LLMExt["System-2 Cloud LLM API<br/>[System_Ext]"]:::ext
     PG[("PostgreSQL 16<br/>[ContainerDb]")]:::db
 
@@ -177,14 +184,18 @@ flowchart TB
     UseCase --> PIIGuard
     UseCase --> WSDEngine
 
-    WSDEngine -->|"Швидкий контур"| Jev
-    WSDEngine -->|"Складні випадки<br/>Protocol DI"| Ports
+    WSDEngine -->|"1-й контур: Noul/Choice<br/>Protocol DI"| Ports
+    WSDEngine -->|"2-й контур: LLM WSD<br/>Protocol DI"| Ports
+    WSDEngine -.->|"Аварійний резерв"| Heuristic
 
     WebAdapter -.->|"Implements"| Ports
+    JevAdapter -.->|"Implements"| Ports
     LLMAdapter -.->|"Implements"| Ports
     PGRepo -.->|"Implements"| Ports
 
     WebAdapter -->|"HTML (SSRF Guard)<br/>HTTPS / TLS 1.3"| WebExt
+    JevAdapter -->|"Квоти<br/>RESP3 / TCP"| RedisQ
+    JevAdapter -->|"Noul, Choice, Score<br/>HTTPS / POST /v1/systemone"| JevExt
     LLMAdapter -->|"Квоти<br/>RESP3 / TCP"| RedisQ
     LLMAdapter -->|"Пакетний запит<br/>HTTPS / JSON Schema"| LLMExt
     PGRepo -->|"Транзакції<br/>AsyncPG / TCP 5432"| PG
@@ -205,17 +216,18 @@ flowchart TB
 
 2. **Шар координації (`Application Layer & Ports`):**
    - **`ProcessAnalysisPipelineUseCase`:** центральний оркестратор пайплайна, що ліквідує каскадну зв'язність між доменними сервісами; реалізує патерн **Pipeline / Application Service**.
-   - **`Application Ports` (`typing.Protocol`):** реалізує принцип **Dependency Inversion (DIP)** — шар сценаріїв і домену залежить виключно від абстрактних інтерфейсів (`WebScraperPort`, `VocabRepoPort`, `SenseRepoPort`, `LLMProviderPort`), а не від конкретних клієнтів `SQLAlchemy` чи `HTTPX`. Залежності ін'єктуються під час старту процесу через `Composition Root`.
+   - **`Application Ports` (`typing.Protocol`):** реалізує принцип **Dependency Inversion (DIP)** — шар сценаріїв і домену залежить виключно від абстрактних інтерфейсів (`WebScraperPort`, `VocabRepoPort`, `SenseRepoPort`, `System1GatePort`, `LLMProviderPort`), а не від конкретних клієнтів `SQLAlchemy`, `typesafe-sdk` чи `HTTPX`. Залежності ін'єктуються під час старту процесу через `Composition Root`.
 
 3. **Доменний шар (`Domain Layer`):**
-   - **`Linguistic Analysis Service`:** виконує токенізацію, лематизацію й виявлення *split phrasal verbs* через `spaCy Dependency Matcher` для `en`, `de`, `es` із `LRU`-кешем (`<= 1` активна модель у `RAM`) — трасування до [`SRS-FUN-06`](./srs.md#srs-fun-06), [`SRS-FUN-07`](./srs.md#srs-fun-07), [`SRS-NFR-INFRA-01`](./srs.md#srs-nfr-infra-01).
+   - **`Linguistic Analysis Service`:** виконує локальну токенізацію, лематизацію й виявлення *split phrasal verbs* через `spaCy Dependency Matcher` для `en`, `de`, `es` із `LRU`-кешем (`<= 1` активна модель у `RAM`) — трасування до [`SRS-FUN-06`](./srs.md#srs-fun-06), [`SRS-FUN-07`](./srs.md#srs-fun-07), [`SRS-NFR-INFRA-01`](./srs.md#srs-nfr-infra-01).
    - **`Complexity Profiling Service`:** обчислює метрику *Comprehensible Input (`i+1`)* / `CEFR` ([`SRS-FUN-08`](./srs.md#srs-fun-08)) та відсікає відомі одиниці (`KNOWN`, `IGNORED`) без прямих запитів у БД ([`SRS-FUN-09`](./srs.md#srs-fun-09)).
-   - **`PII Sanitizer`:** маскує персональні дані у прикладах речень перед формуванням запитів у зовнішній сервіс ([`SRS-FUN-11`](./srs.md#srs-fun-11), [`SRS-NFR-COMP-01`](./srs.md#srs-nfr-comp-01)).
-   - **`WSD Strategy Engine` + `System-1 Jev Strategy`:** реалізує патерн **Strategy** для вибору між миттєвим локальним класифікатором [`System-1`](./srs.md#srs-fun-10) та пакетним викликом `System-2` ([`SRS-FUN-11`](./srs.md#srs-fun-11)).
+   - **`PII Sanitizer`:** маскує персональні дані у прикладах речень до передачі в будь-які зовнішні ШІ-сервіси (`System-1 Jev` і `System-2 LLM`) ([`SRS-FUN-11`](./srs.md#srs-fun-11), [`SRS-NFR-COMP-01`](./srs.md#srs-nfr-comp-01)).
+   - **`WSD Strategy Engine` + `Local Heuristic Fallback`:** реалізує патерн **Strategy** для каскадної дезамбігуації через інтерфейси `System1GatePort` ([`SRS-FUN-10`](./srs.md#srs-fun-10)) та `LLMProviderPort` ([`SRS-FUN-11`](./srs.md#srs-fun-11)), а при недоступності зовнішніх сервісів (`Circuit Breaker == OPEN`) перемикається на локальний детермінований резерв (`WordNet` + евристика речень).
 
 4. **Вихідний шар інфраструктури (`Outbound Adapters`):**
    - **`Safe Web Scraper Adapter`:** завантажує `HTML`-статті через `trafilatura`, попередньо перевіряючи розв'язану DNS IP-адресу через `SSRF Guard` ([`SRS-FUN-01`](./srs.md#srs-fun-01), [`SRS-FUN-04`](./srs.md#srs-fun-04), [`SRS-NFR-SEC-02`](./srs.md#srs-nfr-sec-02)).
-   - **`Resilient LLM Adapter`:** реалізує `LLMProviderPort`, перевіряє квоти `Token Bucket` у `Redis 7`, виконує до `3` повторних спроб у межах бюджету `<= 8.0 с` (`Exponential Backoff with Jitter`), а при стані `Circuit Breaker == OPEN` повертає управління `System-1` за `<= 500 мс` із `degraded_mode=true` ([`SRS-FUN-12`](./srs.md#srs-fun-12), [`SRS-NFR-REL-01`](./srs.md#srs-nfr-rel-01)).
+   - **`Resilient Jev Adapter`:** реалізує `System1GatePort`, інтегрується зі зовнішнім `TypeSafe AI API` (`POST /v1/systemone`, бібліотека `typesafe-sdk` або `HTTPX` із ключем `TYPESAFE_API_KEY`) із типізованими примітивами `Noul` (булева фільтрація артефактів), `Choice` (вибір семантичного сенсу та найкращого речення) і `Score` (`70–500 мс`), контролює квоти `Token Bucket` у `Redis 7` та захищений `Circuit Breaker` ([`SRS-FUN-10`](./srs.md#srs-fun-10), [`SRS-NFR-REL-01`](./srs.md#srs-nfr-rel-01)).
+   - **`Resilient LLM Adapter`:** реалізує `LLMProviderPort`, перевіряє квоти `Token Bucket` у `Redis 7`, виконує до `3` повторних спроб у межах бюджету `<= 8.0 с` (`Exponential Backoff with Jitter`), а при стані `Circuit Breaker == OPEN` повертає управління `System-1` або локальному резерву за `<= 500 мс` із `degraded_mode=true` ([`SRS-FUN-12`](./srs.md#srs-fun-12), [`SRS-NFR-REL-01`](./srs.md#srs-nfr-rel-01)).
    - **`PostgreSQL Persistence Adapter`:** виконує асинхронні транзакції через `SQLAlchemy 2.0 AsyncPG` із конструкцією `INSERT ... ON CONFLICT DO UPDATE / NOTHING` для підтримки унікальності `(lemma, part_of_speech)` при конкурентному записі ([`SRS-FUN-12`](./srs.md#srs-fun-12), [`ADR-001`](./adr/0001-choice-of-technology.md)).
 
 ---
