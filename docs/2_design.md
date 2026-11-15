@@ -16,23 +16,25 @@
 #### Діаграма C4 Level 1 — System Context Diagram
 
 ```mermaid
-C4Context
-    title System Context Diagram — Lexical Extraction & WSD Platform
+flowchart TB
+    classDef person fill:#08427B,stroke:#052E56,color:#FFFFFF
+    classDef system fill:#1168BD,stroke:#0B4884,color:#FFFFFF
+    classDef ext fill:#6B7280,stroke:#4B5563,color:#FFFFFF
 
-    Person(user, "Кінцевий користувач", "Вивчає мови (en, de, es), передає URL або аудіофайли, проводить тріаж слів і завантажує колоди карток")
-    Person(operator, "Оператор моніторингу (SRE)", "Контролює метрики продуктивності /metrics, довжину черг ARQ, DLQ та журнали X-Correlation-ID")
+    User["Кінцевий користувач<br/>[Person]<br/>Навчання мов en / de / es"]:::person
+    SRE["Оператор моніторингу (SRE)<br/>[Person]<br/>Контроль метрик і черг"]:::person
 
-    System(lex_system, "Lexical Extraction & WSD System", "Modular Monolith для автоматизованого вилучення лексики, оцінки складності (i+1 / CEFR), двоконтурної дезамбігуації та експорту карток")
+    LexSys["Lexical Extraction & WSD System<br/>[Software System]<br/>Modular Monolith: вилучення, i+1,<br/>двоконтурний WSD та експорт"]:::system
 
-    System_Ext(media_src, "Media & Web Providers", "YouTube, подкасти, вебстатті (субтитри, аудіопотоки, HTML-контент)")
-    System_Ext(llm_api, "System-2 Cloud LLM API", "OpenAI-сумісний сервіс пакетної дезамбігуації (Structured Outputs, Zero Data Retention)")
-    System_Ext(srs_app, "Anki / SRS Platforms", "Зовнішні клієнти інтервального повторення (імпорт .apkg, .tsv, .csv, .md)")
+    MediaExt["Media & Web Providers<br/>[System_Ext]<br/>YouTube, подкасти, вебстатті"]:::ext
+    LLMExt["System-2 Cloud LLM API<br/>[System_Ext]<br/>Structured Outputs, Zero Retention"]:::ext
+    AnkiExt["Anki / SRS Platforms<br/>[System_Ext]<br/>Клієнти інтервального повторення"]:::ext
 
-    Rel(user, lex_system, "Передає джерела, виконує тріаж, завантажує картки", "HTTPS / TLS 1.3 (JWT Bearer)")
-    Rel(operator, lex_system, "Аудит метрик черг і стану сервісів", "HTTPS / Prometheus & JSON Logs")
-    Rel(lex_system, media_src, "Вилучення субтитрів, вебтексту й аудіо (із захистом SSRF)", "HTTPS / TLS 1.3")
-    Rel(lex_system, llm_api, "Пакетна дезамбігуація (під захистом Circuit Breaker)", "HTTPS / JSON Schema REST")
-    Rel(user, srs_app, "Імпортує експортовані пакети карток", "Локальні файли (.apkg, .tsv, .csv, .md)")
+    User -->|"Джерела, тріаж, експорт<br/>HTTPS / TLS 1.3 (JWT)"| LexSys
+    SRE -->|"Аудит стану й черг<br/>HTTPS / Prometheus"| LexSys
+    LexSys -->|"Субтитри й аудіо (SSRF)<br/>HTTPS / TLS 1.3"| MediaExt
+    LexSys -->|"Пакетний WSD (CB)<br/>HTTPS / JSON Schema"| LLMExt
+    User -.->|"Імпорт карток<br/>.apkg, .tsv, .csv, .md"| AnkiExt
 ```
 
 ##### Технічний опис вузлів, акторів та протоколів рівня System Context
@@ -48,45 +50,53 @@ C4Context
 #### Діаграма C4 Level 2 — Container Diagram
 
 ```mermaid
-C4Container
-    title Container Diagram — Lexical Extraction & WSD System (Docker Compose)
+flowchart TB
+    classDef person fill:#08427B,stroke:#052E56,color:#FFFFFF
+    classDef container fill:#2563EB,stroke:#1D4ED8,color:#FFFFFF
+    classDef db fill:#1E40AF,stroke:#1E3A8A,color:#FFFFFF
+    classDef ext fill:#6B7280,stroke:#4B5563,color:#FFFFFF
 
-    Person(user, "Кінцевий користувач", "Клієнт вебзастосунку / REST API")
-    Person(operator, "Оператор моніторингу (SRE)", "Інженер супроводу")
+    User["Кінцевий користувач<br/>[Person]"]:::person
+    SRE["Оператор моніторингу (SRE)<br/>[Person]"]:::person
 
-    System_Boundary(c1, "Lexical Extraction & WSD Platform (Docker Compose)") {
-        Container(proxy, "Reverse Proxy", "Nginx 1.25 (Alpine)", "Термінація TLS 1.3, ліміт завантаження client_max_body_size 500M, генерація X-Correlation-ID, захист внутрішніх точок")
-        Container(api, "FastAPI Backend API", "Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2.0", "Автентифікація OAuth 2.0 / JWT, валідація magic bytes, SSRF Guard, ідемпотентність, маршрутизація черг, експорт карток")
-        Container(nlp_worker, "NLP Background Worker", "Python 3.12, ARQ, spaCy, Jev, HTTPX (<= 512 MiB)", "Обслуговує default_queue: вебвилучення, лематизація, MWE, оцінка i+1, двоконтурний WSD (System-1 / System-2), GDPR")
-        Container(transcribe_worker, "ASR Background Worker", "Python 3.12, ARQ, faster-whisper INT8, yt-dlp, FFmpeg (<= 2.0 GiB)", "Обслуговує heavy_transcribe_queue: завантаження медіа, локальна транскрибація до 120 хв, запис у transcribe_dlq")
-        ContainerQueue(redis, "Redis 7 Broker & Cache", "Redis 7.2 (In-Memory)", "Черги default_queue, heavy_transcribe_queue, default_dlq, transcribe_dlq; кеш ідемпотентності, Token Bucket, JTI Blacklist")
-        ContainerDb(pg, "PostgreSQL 16 Database", "PostgreSQL 16 (Relational DB)", "Користувачі, MediaSource, Transcript, global_lemmas, lexical_senses, user_vocabulary, SourceAnalysisSession")
-        ContainerDb(minio, "MinIO Object Storage", "MinIO (S3 Compatible)", "Транзитне зберігання завантажених аудіофайлів (автоочищення за Lifecycle Rule <= 24 год)")
-        Container(prom, "Prometheus", "Prometheus TSDB", "Періодичний збір метрик продуктивності та глибини черг ARQ")
-    }
+    subgraph Boundary["Lexical Extraction & WSD Platform (Docker Compose)"]
+        direction TB
+        Proxy["Reverse Proxy<br/>[Nginx 1.25 Alpine]<br/>TLS 1.3, 500 MB, Correlation-ID"]:::container
+        Prom["Prometheus<br/>[Container: TSDB]<br/>Метрики кожні 15 с"]:::container
+        API["FastAPI Backend API<br/>[Python 3.12, FastAPI, Pydantic v2]<br/>JWT, MIME, SSRF, експорт"]:::container
+        Redis(["Redis 7 Broker & Cache<br/>[ContainerQueue]<br/>Черги ARQ, DLQ, Token Bucket"]):::db
+        NLP["NLP Background Worker<br/>[ARQ, spaCy, Jev, HTTPX]<br/>default_queue, <= 512 MiB"]:::container
+        ASR["ASR Background Worker<br/>[ARQ, faster-whisper INT8]<br/>heavy_queue, <= 2.0 GiB"]:::container
+        PG[("PostgreSQL 16<br/>[ContainerDb]<br/>Лексика, сесії, користувачі")]:::db
+        MinIO[("MinIO S3 Storage<br/>[ContainerDb]<br/>Транзитні медіа <= 24 год")]:::db
+    end
 
-    System_Ext(media_src, "Media & Web Providers", "YouTube / Подкасти / Вебсторінки")
-    System_Ext(llm_api, "System-2 Cloud LLM API", "Зовнішній OpenAI-сумісний API")
+    MediaExt["Media & Web Providers<br/>[System_Ext]"]:::ext
+    LLMExt["System-2 Cloud LLM API<br/>[System_Ext]"]:::ext
 
-    Rel(user, proxy, "Запити API, завантаження медіа (<= 500 MB), експорт", "HTTPS / TLS 1.3")
-    Rel(operator, proxy, "Перегляд метрик і стану черг", "HTTPS / TLS 1.3 (Basic Auth)")
-    Rel(proxy, api, "Проксування API-запитів із X-Correlation-ID", "HTTP / Reverse Proxy (TCP 8000)")
-    Rel(proxy, prom, "Доступ до панелі метрик", "HTTP (TCP 9090)")
+    User -->|"Запити й файли <= 500 MB<br/>HTTPS / TLS 1.3"| Proxy
+    SRE -->|"Метрики<br/>HTTPS / Basic Auth"| Proxy
 
-    Rel(api, redis, "Постановка задач, Token Bucket, X-Idempotency-Key, JTI Blacklist", "RESP3 / TCP (порт 6379)")
-    Rel(api, pg, "CRUD, автентифікація, перевірка SHA-256, вибірка для експорту", "PostgreSQL Wire / AsyncPG (TCP 5432)")
-    Rel(api, minio, "Збереження перевірених аудіофайлів", "S3 REST API / HTTP (порт 9000)")
-    Rel(prom, api, "Періодичний збір метрик /metrics (раз на 15 с)", "HTTP (TCP 8000)")
+    Proxy -->|"API-трафік<br/>HTTP / TCP 8000"| API
+    Proxy -->|"Дашборд<br/>HTTP / TCP 9090"| Prom
+    Prom -.->|"Збір /metrics<br/>HTTP / TCP 8000"| API
 
-    Rel(nlp_worker, redis, "Вилучення задач (BLPOP) із default_queue, запис у default_dlq", "RESP3 / TCP (порт 6379)")
-    Rel(transcribe_worker, redis, "Вилучення задач із heavy_transcribe_queue, запис у transcribe_dlq", "RESP3 / TCP (порт 6379)")
-    Rel(nlp_worker, pg, "Збереження лем, сенсів, статусів та асинхронне GDPR-очищення", "PostgreSQL Wire / AsyncPG (TCP 5432)")
-    Rel(transcribe_worker, pg, "Збереження транскриптів і часових міток", "PostgreSQL Wire / AsyncPG (TCP 5432)")
-    Rel(transcribe_worker, minio, "Читання транзитних аудіофайлів", "S3 REST API / HTTP (порт 9000)")
+    API -->|"Задачі, кеш, JTI<br/>RESP3 / TCP 6379"| Redis
+    API -->|"CRUD, SHA-256<br/>AsyncPG / TCP 5432"| PG
+    API -->|"Запис аудіо<br/>S3 REST / HTTP 9000"| MinIO
 
-    Rel(nlp_worker, media_src, "Отримання HTML вебстатей із перевіркою SSRF", "HTTPS / TLS 1.3")
-    Rel(transcribe_worker, media_src, "Завантаження медіапотоків та субтитрів із перевіркою SSRF", "HTTPS / TLS 1.3")
-    Rel(nlp_worker, llm_api, "Пакетна дезамбігуація (Circuit Breaker + Token Bucket)", "HTTPS / JSON Schema REST")
+    NLP -->|"BLPOP / DLQ<br/>RESP3 / TCP 6379"| Redis
+    ASR -->|"BLPOP / DLQ<br/>RESP3 / TCP 6379"| Redis
+
+    NLP -->|"Леми, сенси, GDPR<br/>AsyncPG / TCP 5432"| PG
+    ASR -->|"Транскрипти<br/>AsyncPG / TCP 5432"| PG
+    ASR -->|"Читання аудіо<br/>S3 REST / HTTP 9000"| MinIO
+
+    NLP -->|"Вебстатті (SSRF)<br/>HTTPS / TLS 1.3"| MediaExt
+    ASR -->|"Медіа й субтитри<br/>HTTPS / TLS 1.3"| MediaExt
+    NLP -->|"Пакетний WSD<br/>HTTPS / JSON Schema"| LLMExt
+
+    style Boundary fill:transparent,stroke:#64748B,stroke-dasharray: 5 5
 ```
 
 ##### Технічний опис контейнерів та наскрізне трасування до вимог SRS і ADR
@@ -109,58 +119,81 @@ C4Container
 #### Діаграма C4 Level 3 — Component Diagram (`NLP & Semantic Disambiguation Worker`)
 
 ```mermaid
-C4Component
-    title Component Diagram — NLP & Semantic Disambiguation Worker (Clean Architecture)
+flowchart TB
+    classDef comp fill:#3B82F6,stroke:#1D4ED8,color:#FFFFFF
+    classDef port fill:#0EA5E9,stroke:#0369A1,color:#FFFFFF,stroke-dasharray: 5 3
+    classDef db fill:#1E40AF,stroke:#1E3A8A,color:#FFFFFF
+    classDef ext fill:#6B7280,stroke:#4B5563,color:#FFFFFF
 
-    ContainerQueue(redis_q, "Redis 7 (Queues & Token Bucket)", "Redis 7.2", "Черги default_queue, default_dlq та лічильники Token Bucket")
-    ContainerDb(pg_db, "PostgreSQL 16", "PostgreSQL 16", "Таблиці MediaSource, Transcript, global_lemmas, lexical_senses, user_vocabulary")
-    System_Ext(web_ext, "External Web Sites", "Зовнішні вебстатті")
-    System_Ext(llm_ext, "System-2 Cloud LLM API", "OpenAI-сумісний сервіс дезамбігуації")
+    RedisQ(["Redis 7<br/>[ContainerQueue]<br/>default_queue, default_dlq,<br/>Token Bucket"]):::db
 
-    Container_Boundary(nlp_worker, "NLP & Semantic Disambiguation Worker (nlp_worker)") {
-        Component(consumer, "ARQ Task Consumer", "ARQ Worker Entrypoint", "Отримує завдання з default_queue і передає його у шар валідації")
-        Component(val_ctx, "Task Validator & Tenant Guard", "Pydantic v2 + ContextVars", "Валідує DTO задачі, відновлює X-Correlation-ID і перевіряє права власника user_id")
-        Component(err_handler, "Worker Fault & DLQ Handler", "Resilience Handler", "Перехоплює критичні винятки, переводить сесію у FAILED та маршрутизує в default_dlq")
+    subgraph Worker["NLP & Semantic Disambiguation Worker (nlp_worker)"]
+        direction TB
 
-        Component(use_case, "ProcessAnalysisPipelineUseCase", "Application Service", "Координує сценарій: завантаження -> NLP -> оцінка i+1 -> PII-санітизація -> WSD -> збереження")
+        subgraph Inbound["1. Вхідний шар (Inbound & Guards)"]
+            direction LR
+            Consumer["ARQ Task Consumer<br/>[Опитування черги]"]:::comp
+            Validator["Task Validator & Tenant Guard<br/>[Pydantic v2, Correlation-ID, user_id]"]:::comp
+            ErrHandler["Worker Fault & DLQ Handler<br/>[Статус FAILED + DLQ]"]:::comp
+        end
 
-        Component(ling_svc, "Linguistic Analysis Service", "spaCy Pipeline (LRU <= 1 model)", "Токенізація, лематизація, POS-розмітка і детекція MWE (Dependency Matcher)")
-        Component(profiler, "Complexity Profiling Service", "Domain Service", "Розрахунок покриття i+1 / CEFR і формування рейтингу кандидатів")
-        Component(pii_guard, "PII Sanitizer", "Domain Privacy Filter", "Маскування email, телефонів та імен у контекстах перед передачею в LLM")
-        Component(wsd_engine, "WSD Strategy Engine", "Domain Strategy", "Двоконтурна маршрутизація: швидкий System-1 (Jev) vs пакетний System-2 (LLM)")
-        Component(jev_clf, "System-1 Jev Strategy", "Local Classifier", "Локальна дезамбігуація однозначних та високовживаних лем")
+        subgraph AppCore["2. Координація та порти (Application & DIP)"]
+            direction LR
+            UseCase["ProcessAnalysisPipelineUseCase<br/>[Оркестратор пайплайна]"]:::comp
+            Ports["Application Ports<br/>[typing.Protocol]<br/>WebScraper / VocabRepo /<br/>SenseRepo / LLMProvider"]:::port
+        end
 
-        Component(ports, "Application Ports", "typing.Protocol", "Абстрактні інтерфейси: WebScraperPort, VocabRepoPort, SenseRepoPort, LLMProviderPort")
+        subgraph Domain["3. Доменний шар (Domain Core)"]
+            direction LR
+            LingSvc["Linguistic Analysis<br/>[spaCy LRU <= 1, MWE]"]:::comp
+            Profiler["Complexity Profiler<br/>[i+1 / CEFR]"]:::comp
+            PIIGuard["PII Sanitizer<br/>[Zero Retention]"]:::comp
+            WSDEngine["WSD Strategy Engine<br/>[Патерн Strategy]"]:::comp
+            Jev["System-1 Jev<br/>[Локальний WSD]"]:::comp
+        end
 
-        Component(web_adapter, "Safe Web Scraper Adapter", "HTTPX + trafilatura + SSRF Guard", "Перевіряє DNS/IP проти приватних підмереж і вилучає HTML-текст")
-        Component(llm_adapter, "Resilient LLM Adapter", "HTTPX + Tenacity + Circuit Breaker", "Перевіряє Token Bucket, виконує до 3 спроб (budget <= 8s) і перемикає на System-1 (<= 500 ms)")
-        Component(pg_repo, "PostgreSQL Persistence Adapter", "SQLAlchemy 2.0 AsyncPG", "Індексна вибірка словника користувача і транзакційний запис INSERT ... ON CONFLICT")
-    }
+        subgraph Outbound["4. Вихідні адаптери (Outbound Adapters)"]
+            direction LR
+            WebAdapter["Safe Web Scraper<br/>[trafilatura + SSRF Guard]"]:::comp
+            LLMAdapter["Resilient LLM Adapter<br/>[Tenacity + Circuit Breaker]"]:::comp
+            PGRepo["PostgreSQL Adapter<br/>[AsyncPG + ON CONFLICT]"]:::comp
+        end
+    end
 
-    Rel(consumer, redis_q, "Опитування задач (BLPOP)", "RESP3 / TCP")
-    Rel(consumer, val_ctx, "Передача сирого повідомлення задачі", "Python Call")
-    Rel(val_ctx, use_case, "Запуск валідованого сценарію", "Python DTO Call")
-    Rel(consumer, err_handler, "Обробка фатальних винятків після max_tries", "Exception Trap")
-    Rel(err_handler, ports, "Оновлення статусу FAILED через абстрактний порт", "Protocol Dispatch")
-    Rel(err_handler, redis_q, "Запис діагностики у default_dlq", "RESP3 / TCP")
+    WebExt["External Web Sites<br/>[System_Ext]"]:::ext
+    LLMExt["System-2 Cloud LLM API<br/>[System_Ext]"]:::ext
+    PG[("PostgreSQL 16<br/>[ContainerDb]")]:::db
 
-    Rel(use_case, ports, "Взаємодія із зовнішніми ресурсами через інтерфейси", "Protocol DI")
-    Rel(use_case, ling_svc, "Морфосинтаксичний аналіз тексту", "Python Call")
-    Rel(use_case, profiler, "Обчислення індексу i+1 / CEFR", "Python Call")
-    Rel(use_case, pii_guard, "Очищення контекстів від персональних даних", "Python Call")
-    Rel(use_case, wsd_engine, "Запуск дезамбігуації кандидатів", "Python Call")
+    Consumer -->|"BLPOP<br/>RESP3 / TCP"| RedisQ
+    Consumer -->|"Сире повідомлення"| Validator
+    Consumer -.->|"Після max_tries"| ErrHandler
+    ErrHandler -->|"Запис у default_dlq<br/>RESP3 / TCP"| RedisQ
+    ErrHandler -->|"FAILED<br/>Protocol DI"| Ports
 
-    Rel(wsd_engine, jev_clf, "Первинна локальна класифікація", "Strategy Call")
-    Rel(wsd_engine, ports, "Виклик LLMProviderPort для складних випадків", "Protocol DI")
+    Validator -->|"Валідний DTO"| UseCase
+    UseCase -->|"Зовнішній I/O<br/>Protocol DI"| Ports
+    UseCase --> LingSvc
+    UseCase --> Profiler
+    UseCase --> PIIGuard
+    UseCase --> WSDEngine
 
-    Rel(web_adapter, ports, "Реалізує WebScraperPort", "Implements Protocol")
-    Rel(llm_adapter, ports, "Реалізує LLMProviderPort", "Implements Protocol")
-    Rel(pg_repo, ports, "Реалізує VocabRepoPort та SenseRepoPort", "Implements Protocol")
+    WSDEngine -->|"Швидкий контур"| Jev
+    WSDEngine -->|"Складні випадки<br/>Protocol DI"| Ports
 
-    Rel(web_adapter, web_ext, "Отримання HTML-сторінки після SSRF-перевірки", "HTTPS / TLS 1.3")
-    Rel(llm_adapter, redis_q, "Перевірка ліміту Token Bucket", "RESP3 / TCP")
-    Rel(llm_adapter, llm_ext, "Пакетний запит (Structured Outputs)", "HTTPS / JSON Schema")
-    Rel(pg_repo, pg_db, "Асинхронні транзакції AsyncSession", "PostgreSQL Wire / TCP 5432")
+    WebAdapter -.->|"Implements"| Ports
+    LLMAdapter -.->|"Implements"| Ports
+    PGRepo -.->|"Implements"| Ports
+
+    WebAdapter -->|"HTML (SSRF Guard)<br/>HTTPS / TLS 1.3"| WebExt
+    LLMAdapter -->|"Квоти<br/>RESP3 / TCP"| RedisQ
+    LLMAdapter -->|"Пакетний запит<br/>HTTPS / JSON Schema"| LLMExt
+    PGRepo -->|"Транзакції<br/>AsyncPG / TCP 5432"| PG
+
+    style Worker fill:transparent,stroke:#64748B,stroke-dasharray: 5 5
+    style Inbound fill:transparent,stroke:#475569
+    style AppCore fill:transparent,stroke:#475569
+    style Domain fill:transparent,stroke:#475569
+    style Outbound fill:transparent,stroke:#475569
 ```
 
 ##### Деталізований опис внутрішніх компонентів сервісу, патернів і трасування до вимог
@@ -171,7 +204,7 @@ C4Component
    - **`Worker Fault & DLQ Handler`:** перехоплює критичні помилки обробки, оновлює статус сесії на `FAILED` через порт репозиторію (без прямого зв'язування з ORM) та записує діагностику в `default_dlq` ([`SRS-FUN-13`](./srs.md#srs-fun-13)).
 
 2. **Шар координації (`Application Layer & Ports`):**
-   - **`ProcessAnalysisPipelineUseCase`:** центральний оркестратор пайплайну, що ліквідує каскадну зв'язність між доменними сервісами; реалізує патерн **Pipeline / Application Service**.
+   - **`ProcessAnalysisPipelineUseCase`:** центральний оркестратор пайплайна, що ліквідує каскадну зв'язність між доменними сервісами; реалізує патерн **Pipeline / Application Service**.
    - **`Application Ports` (`typing.Protocol`):** реалізує принцип **Dependency Inversion (DIP)** — шар сценаріїв і домену залежить виключно від абстрактних інтерфейсів (`WebScraperPort`, `VocabRepoPort`, `SenseRepoPort`, `LLMProviderPort`), а не від конкретних клієнтів `SQLAlchemy` чи `HTTPX`. Залежності ін'єктуються під час старту процесу через `Composition Root`.
 
 3. **Доменний шар (`Domain Layer`):**
