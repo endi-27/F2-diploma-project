@@ -1,0 +1,741 @@
+openapi: 3.0.3
+info:
+  title: Lexical Extraction & WSD Platform API
+  version: 1.0.0
+  description: |
+    Міжсервісний та зовнішній REST API контракт асинхронної системи автоматизованого
+    вилучення, морфосинтаксичного аналізу, оцінки складності (i+1 / CEFR), двоконтурної
+    семантичної дезамбігуації (System-1 TypeSafe AI Jev + System-2 Cloud LLM API) та
+    експорту флеш-карток (.apkg, .tsv, .csv, .md).
+  contact:
+    name: Пастух Андрій Юрійович (F2 Інженерія програмного забезпечення)
+servers:
+  - url: https://api.lexextract.local
+    description: Reverse Proxy (Nginx 1.25 TLS 1.3 Gateway)
+tags:
+  - name: Auth
+    description: Автентифікація JWT Bearer та керування життєвим циклом refresh-токенів
+  - name: Users
+    description: Керування профілем користувача та регламент GDPR
+  - name: Sources
+    description: Ідемпотентна інгестія медіа- й вебджерел
+  - name: Sessions
+    description: Моніторинг статусу аналізу та отримання відібраної лексики
+  - name: Vocabulary
+    description: Інтерактивний тріаж семантичних значень (Optimistic Locking)
+  - name: Exports
+    description: Асинхронна генерація пакетів карток у MinIO S3
+  - name: Observability
+    description: Перевірка готовності вузла для Reverse Proxy і SRE
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: loginUser
+      summary: Автентифікація користувача та випуск JWT-пари
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Успішна автентифікація; повернено access і refresh токени
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationIdHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokensResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimitProblem'
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshAccessToken
+      summary: Ротація refresh-токена з перевіркою JTI Blacklist
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          description: Токен оновлено; попередній JTI утилізовано
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationIdHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokensResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+
+  /api/v1/users/me:
+    delete:
+      tags: [Users]
+      operationId: deleteCurrentUserGdpr
+      summary: Двоетапне видалення облікового запису за ст. 17 GDPR (Right to be Forgotten)
+      description: |
+        Фаза 1 (синхронно <= 5.0 с): блокування профілю (deleted_at, is_active=false),
+        внесення JTI до чорного списку Redis 7 і відкликання refresh_tokens.
+        Фаза 2 (асинхронно <= 60.0 с): фонове каскадне видалення персональних таблиць без
+        блокування спільного словника global_lemmas та lexical_senses.
+      responses:
+        '202':
+          description: Синхронне блокування завершено; фонове очищення поставлено в чергу ARQ
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationIdHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GdprDeletionAcceptedResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '403':
+          $ref: '#/components/responses/ForbiddenProblem'
+
+  /api/v1/sources:
+    post:
+      tags: [Sources]
+      operationId: ingestMediaSource
+      summary: Ідемпотентна інгестія URL або аудіофайлу та маршрутизація в чергу ARQ
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+        - $ref: '#/components/parameters/OptionalCorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceUploadJsonRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/SourceUploadMultipartRequest'
+      responses:
+        '202':
+          description: Запит прийнято; створено SourceAnalysisSession (PENDING) і поставлено задачу в ARQ
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationIdHeader'
+            Location:
+              description: Відносний URI статусу сесії аналізу
+              schema:
+                type: string
+                example: /api/v1/sessions/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+            Retry-After:
+              description: Рекомендований інтервал опитування статусу (с)
+              schema:
+                type: integer
+                example: 5
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceAcceptedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestProblem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '409':
+          $ref: '#/components/responses/ConflictProblem'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeProblem'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaTypeProblem'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimitProblem'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableProblem'
+
+  /api/v1/sessions/{session_id}:
+    get:
+      tags: [Sessions]
+      operationId: getAnalysisSession
+      summary: Отримання стану сесії аналізу, оцінки i+1 та результатів WSD
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/OptionalCorrelationIdHeader'
+      responses:
+        '200':
+          description: Поточний стан сесії аналізу та відібрані кандидати
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationIdHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceAnalysisSessionResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '403':
+          $ref: '#/components/responses/ForbiddenProblem'
+        '404':
+          $ref: '#/components/responses/NotFoundProblem'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableProblem'
+
+  /api/v1/vocabulary/senses/{sense_id}:
+    patch:
+      tags: [Vocabulary]
+      operationId: triageLexicalSense
+      summary: Інтерактивний тріаж семантичного значення слова (Optimistic Locking)
+      parameters:
+        - name: sense_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/OptionalCorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TriageSenseRequest'
+      responses:
+        '200':
+          description: Статус вивчення оновлено; повернено новий номер версії
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationIdHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserVocabularyItemResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '404':
+          $ref: '#/components/responses/NotFoundProblem'
+        '409':
+          $ref: '#/components/responses/ConflictProblem'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+
+  /api/v1/exports:
+    post:
+      tags: [Exports]
+      operationId: createExportJob
+      summary: Ідемпотентна постановка задачі генерації пакета флеш-карток
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+        - $ref: '#/components/parameters/OptionalCorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateExportRequest'
+      responses:
+        '202':
+          description: Задачу експорту поставлено в чергу arq:queue:default_queue
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationIdHeader'
+            Location:
+              description: Відносний URI статусу задачі експорту
+              schema:
+                type: string
+                example: /api/v1/exports/3e4a2a1c-4d5e-4f10-9123-abcde1234567
+            Retry-After:
+              description: Рекомендований інтервал опитування статусу (с)
+              schema:
+                type: integer
+                example: 5
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportJobResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '409':
+          $ref: '#/components/responses/ConflictProblem'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimitProblem'
+
+  /api/v1/exports/{export_id}:
+    get:
+      tags: [Exports]
+      operationId: getExportJob
+      summary: Отримання статусу генерації пакета та URL для завантаження з MinIO S3
+      parameters:
+        - name: export_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Статус задачі експорту (при COMPLETED містить s3_download_url)
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationIdHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportJobResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '404':
+          $ref: '#/components/responses/NotFoundProblem'
+
+  /healthz:
+    get:
+      tags: [Observability]
+      operationId: healthCheck
+      summary: Перевірка доступності PostgreSQL 16 та Redis 7
+      security: []
+      responses:
+        '200':
+          description: Усі залежності доступні
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckResponse'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableProblem'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Передача JWT Access Token у заголовку Authorization Bearer <token>
+
+  parameters:
+    IdempotencyKeyHeader:
+      name: X-Idempotency-Key
+      in: header
+      required: true
+      description: Унікальний UUIDv4-ключ клієнта для захисту від дублювання мутуючих операцій (TTL 24 год)
+      schema:
+        type: string
+        format: uuid
+    OptionalCorrelationIdHeader:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: Наскрізний ідентифікатор трасування (за відсутності генерується на Nginx/FastAPI)
+      schema:
+        type: string
+        format: uuid
+
+  headers:
+    CorrelationIdHeader:
+      description: Наскрізний ідентифікатор трасування запиту в логах FastAPI та ARQ
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequestProblem:
+      description: Некоректна структура запиту або заблоковано SSRF Guard
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    UnauthorizedProblem:
+      description: Відсутній, прострочений або відкликаний (JTI Blacklist) JWT-токен
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ForbiddenProblem:
+      description: Обліковий запис заблоковано або позначено до видалення (GDPR)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    NotFoundProblem:
+      description: Запитуваний ресурс відсутній
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ConflictProblem:
+      description: Конфлікт оптимістичного блокування (version) або паралельного X-Idempotency-Key
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    PayloadTooLargeProblem:
+      description: Розмір аудіофайлу перевищує ліміт 500 MB (524288000 байт)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    UnsupportedMediaTypeProblem:
+      description: Невідповідність сигнатури magic bytes дозволеним аудіоформатам
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ValidationProblem:
+      description: Помилка валідації бізнес-обмежень схеми Pydantic v2
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    RateLimitProblem:
+      description: Перевищено квоту Token Bucket / Sliding Window (HTTP 429)
+      headers:
+        Retry-After:
+          description: Кількість секунд до відновлення квоти
+          schema:
+            type: integer
+            example: 60
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ServiceUnavailableProblem:
+      description: Недоступність брокера Redis 7, MinIO S3 або спрацювання Circuit Breaker
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+  schemas:
+    LanguageEnum:
+      type: string
+      enum: [en, de, es]
+      default: en
+      description: Код мови за ISO 639-1 (відповідає CHAR(2) у PostgreSQL 16)
+
+    CefrLevelEnum:
+      type: string
+      enum: [A1, A2, B1, B2, C1, C2]
+
+    SourceTypeEnum:
+      type: string
+      enum: [YOUTUBE, PODCAST, WEB_ARTICLE, AUDIO_FILE]
+
+    SessionStatusEnum:
+      type: string
+      enum: [PENDING, PROCESSING, COMPLETED, FAILED]
+
+    IPlusOneStatusEnum:
+      type: string
+      enum: [OPTIMAL, TOO_EASY, TOO_HARD]
+
+    VocabStatusEnum:
+      type: string
+      enum: [NEW, LEARNING, KNOWN, IGNORED]
+
+    ExportFormatEnum:
+      type: string
+      enum: [APKG, TSV, CSV, MD]
+
+    JobStatusEnum:
+      type: string
+      enum: [PENDING, PROCESSING, COMPLETED, FAILED]
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+          writeOnly: true
+
+    AuthTokensResponse:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Термін дії access-токена в секундах (<= 1800 за SRS-NFR-SEC-01)
+          maximum: 1800
+          example: 900
+
+    RefreshTokenRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          minLength: 32
+          maxLength: 512
+
+    GdprDeletionAcceptedResponse:
+      type: object
+      required: [status, purge_scheduled_at]
+      properties:
+        status:
+          type: string
+          enum: [PENDING_PURGE]
+        purge_scheduled_at:
+          type: string
+          format: date-time
+
+    SourceUploadJsonRequest:
+      type: object
+      required: [source_url, source_type]
+      properties:
+        source_url:
+          type: string
+          format: uri
+          pattern: '^https?://.+$'
+          maxLength: 2048
+        source_type:
+          type: string
+          enum: [YOUTUBE, PODCAST, WEB_ARTICLE]
+        language:
+          $ref: '#/components/schemas/LanguageEnum'
+
+    SourceUploadMultipartRequest:
+      type: object
+      required: [file, source_type]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: Аудіофайл (MP3, WAV, M4A, OGG) розміром <= 500 MB
+        source_type:
+          type: string
+          enum: [AUDIO_FILE]
+        language:
+          $ref: '#/components/schemas/LanguageEnum'
+
+    SourceAcceptedResponse:
+      type: object
+      required: [session_id, status, correlation_id]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING]
+        correlation_id:
+          type: string
+          format: uuid
+
+    SourceAnalysisSessionResponse:
+      type: object
+      required:
+        - session_id
+        - source_id
+        - status
+        - degraded_mode
+        - correlation_id
+        - created_at
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        source_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/SessionStatusEnum'
+        lexical_coverage:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 100.0
+          nullable: true
+        i_plus_one_status:
+          allOf:
+            - $ref: '#/components/schemas/IPlusOneStatusEnum'
+          nullable: true
+        degraded_mode:
+          type: boolean
+        error_code:
+          type: string
+          maxLength: 64
+          nullable: true
+        error_details:
+          type: object
+          additionalProperties: true
+          nullable: true
+        correlation_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    TriageSenseRequest:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          $ref: '#/components/schemas/VocabStatusEnum'
+        version:
+          type: integer
+          minimum: 0
+          description: Очікувана версія запису (0 — первинне збереження, >= 1 — Optimistic Locking)
+
+    UserVocabularyItemResponse:
+      type: object
+      required: [id, sense_id, status, version, next_review_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        sense_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/VocabStatusEnum'
+        version:
+          type: integer
+          minimum: 1
+        next_review_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateExportRequest:
+      type: object
+      required: [format]
+      properties:
+        format:
+          $ref: '#/components/schemas/ExportFormatEnum'
+        session_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Необов'язковий фільтр за конкретною сесією аналізу
+        status_filter:
+          type: array
+          items:
+            $ref: '#/components/schemas/VocabStatusEnum'
+          default: [NEW, LEARNING]
+
+    ExportJobResponse:
+      type: object
+      required: [export_id, status, format, created_at]
+      properties:
+        export_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+          nullable: true
+        format:
+          $ref: '#/components/schemas/ExportFormatEnum'
+        status:
+          $ref: '#/components/schemas/JobStatusEnum'
+        s3_download_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Тимчасовий pre-signed URL для завантаження з MinIO S3 (генерується з s3_download_key)
+        error_code:
+          type: string
+          maxLength: 64
+          nullable: true
+        error_details:
+          type: object
+          additionalProperties: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    HealthCheckResponse:
+      type: object
+      required: [status, database, redis, timestamp]
+      properties:
+        status:
+          type: string
+          enum: [UP]
+        database:
+          type: string
+          enum: [HEALTHY, UNHEALTHY]
+        redis:
+          type: string
+          enum: [HEALTHY, UNHEALTHY]
+        timestamp:
+          type: string
+          format: date-time
+
+    InvalidParam:
+      type: object
+      required: [name, reason]
+      properties:
+        name:
+          type: string
+        reason:
+          type: string
+
+    ProblemDetails:
+      type: object
+      required: [type, title, status, detail, instance, code, correlation_id]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+        correlation_id:
+          type: string
+          format: uuid
+        invalid_params:
+          type: array
+          items:
+            $ref: '#/components/schemas/InvalidParam'
